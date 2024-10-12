@@ -16,7 +16,7 @@ type Storage interface {
 
 type StorageReader interface {
 	// When the key doesn't exist, return nil for the value
-	GetCF(cf string, key []byte) ([]byte, error)
-	IterCF(cf string) engine_util.DBIterator
+	GetCF(cf string, key []byte) ([]byte, error)//wanghao: 查询特定CF的key对应的alue
+	IterCF(cf string) engine_util.DBIterator//wanghao: 遍历特定CF下的key-value，注意返回值
 	Close()
 }
