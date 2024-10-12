@@ -1,6 +1,7 @@
 package standalone_storage
 
 import (
+	"github.com/Connor1996/badger"
 	"github.com/pingcap-incubator/tinykv/kv/config"
 	"github.com/pingcap-incubator/tinykv/kv/storage"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
@@ -35,10 +36,44 @@ func (s *StandAloneStorage) Stop() error {
 
 func (s *StandAloneStorage) Reader(ctx *kvrpcpb.Context) (storage.StorageReader, error) {
 	// Your Code Here (1).
-	return nil, nil
+	badgerReader := &BadgerReader{
+		txn: s.engines.Kv.NewTransaction(false),
+	}
+	return badgerReader, nil
 }
 
 func (s *StandAloneStorage) Write(ctx *kvrpcpb.Context, batch []storage.Modify) error {
 	// Your Code Here (1).
+	//util.go中已经完成了对badger数据库操作的封装，直接使用即可，write_batch.go是批量操作的二次封装
+	wb := &engine_util.WriteBatch{}
+	for _, modify := range batch {
+		switch modify.Data.(type) {
+		case storage.Put:
+			wb.SetCF(modify.Cf(), modify.Key(), modify.Value())
+		case storage.Delete:
+			wb.DeleteCF(modify.Cf(), modify.Key())
+		}
+	}
+	err := wb.WriteToDB(s.engines.Kv)
+	if err != nil {
+		return err
+	}
 	return nil
+}
+
+// wanghao:实现StorageReader的结构体
+type BadgerReader struct {
+	txn *badger.Txn
+}
+
+func (br *BadgerReader) GetCF(cf string, key []byte) ([]byte, error) {
+	return engine_util.GetCFFromTxn(br.txn, cf, key)
+}
+
+func (br *BadgerReader) IterCF(cf string) engine_util.DBIterator {
+	return engine_util.NewCFIterator(cf, br.txn)
+}
+
+func (br *BadgerReader) Close() {
+	br.txn.Discard()
 }
