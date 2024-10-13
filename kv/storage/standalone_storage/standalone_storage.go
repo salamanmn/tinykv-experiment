@@ -67,7 +67,12 @@ type BadgerReader struct {
 }
 
 func (br *BadgerReader) GetCF(cf string, key []byte) ([]byte, error) {
-	return engine_util.GetCFFromTxn(br.txn, cf, key)
+	//接口GetCF要求key不存在时，返回nil，不返回错误
+	value, err := engine_util.GetCFFromTxn(br.txn, cf, key)
+	if err != nil && err != badger.ErrKeyNotFound{
+		return nil, err
+	}
+	return value, nil
 }
 
 func (br *BadgerReader) IterCF(cf string) engine_util.DBIterator {
