@@ -70,12 +70,20 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+	prevSoftSt *SoftState
+	prevHardSt pb.HardState
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
-	return nil, nil
+	raft := newRaft(config)
+	rawNode := &RawNode{
+		Raft: raft,
+		prevSoftSt: raft.softState(),
+		prevHardSt: raft.hardState(),
+	}
+	return rawNode, nil
 }
 
 // Tick advances the internal logical clock by a single tick.
@@ -143,12 +151,42 @@ func (rn *RawNode) Step(m pb.Message) error {
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-	return Ready{}
+	rd := Ready{
+		Entries: rn.Raft.RaftLog.unstableEntries(),
+		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
+		Messages: rn.Raft.msgs,
+	}
+
+	if softState := rn.Raft.softState(); !softState.isSoftStateEqual(rn.prevSoftSt) {
+		rn.prevSoftSt = softState
+		rd.SoftState = softState
+	}
+
+	if hardState := rn.Raft.hardState(); !isHardStateEqual(hardState, rn.prevHardSt) {
+		rn.prevHardSt = hardState
+		rd.HardState = hardState
+	}
+
+	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
+		rd.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
+	}
+
+	return rd 
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
+	if hardState := rn.Raft.hardState(); !IsEmptyHardState(hardState) && !isHardStateEqual(hardState, rn.prevHardSt) {
+		return true
+	}
+	if !rn.Raft.softState().isSoftStateEqual(rn.prevSoftSt) ||
+		!IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) ||
+		len(rn.Raft.RaftLog.unstableEntries()) > 0 ||
+		len(rn.Raft.RaftLog.nextEnts()) > 0 ||
+		len(rn.Raft.msgs) > 0 {
+			return true
+	}
 	return false
 }
 
@@ -156,6 +194,29 @@ func (rn *RawNode) HasReady() bool {
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
+	// 硬状态变更
+	if !IsEmptyHardState(rd.HardState) {
+		rn.prevHardSt = rd.HardState
+	}
+
+	//持久化日志
+	if (len(rd.Entries) > 0) {
+		rn.Raft.RaftLog.stabled = rd.Entries[len(rd.Entries)-1].Index
+	}
+
+	//应用日志到状态机
+	if len(rd.CommittedEntries) > 0 {
+		rn.Raft.RaftLog.applied = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
+	}
+
+	//消息已发送，清空要发送的消息
+	rn.Raft.msgs = nil
+
+	//快照已持久化，清空unstable的、snapshot
+	rn.Raft.RaftLog.pendingSnapshot = nil
+
+	//丢弃已经被成快照的日志条目
+	rn.Raft.RaftLog.maybeCompact()
 }
 
 // GetProgress return the Progress of this node and its peers, if this
@@ -173,4 +234,9 @@ func (rn *RawNode) GetProgress() map[uint64]Progress {
 // TransferLeader tries to transfer leadership to the given transferee.
 func (rn *RawNode) TransferLeader(transferee uint64) {
 	_ = rn.Raft.Step(pb.Message{MsgType: pb.MessageType_MsgTransferLeader, From: transferee})
+}
+
+//
+func (a *SoftState) isSoftStateEqual(b *SoftState) bool {
+	return a.Lead == b.Lead && a.RaftState == b.RaftState
 }

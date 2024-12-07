@@ -36,3 +36,45 @@
 2. `RawPut`实现：调用`storage.Write`。调用前，封装好`[]storage.Modify`参数进行传递。
 3. `RawDelete`实现：同`RawPut`
 4. `RawScan`实现：调用`storage.Reader`，调用`Reader.IterCF`,得到`iterator`，迭代遍历，封装响应`resp`
+
+## Project2
+
+### PartA
+
+实验完成当前进度和步骤：
+
+1. 学习Raft一致性共识算法。主要看别人整理好的博客文章https://www.codedump.info/post/20180921-raft/和动画演示理解http://www.kailing.pub/raft/index.html，辅助参考raft官方论文译文https://github.com/maemual/raft-zh_cn/blob/master/raft-zh_cn.md。b站视频学习raft算法https://www.bilibili.com/video/BV1pr4y1b7H5/?spm_id_from=333.337.search-card.all.click。raft学习交互式动画https://raft.github.io/raftscope/index.html
+1. 看功能实现的官方文档和raft文件夹下的实验框架代码。功能实现的官方文档读的不是很明白。
+1. 完善`raft/log.go`代码,完善`raft/raft.go`代码.正在编写become等系列函数,这些函数在测试函数中使用,需要去测试代码中看看这些函数怎么用的,怎么测试project2a的功能的.
+
+实验随手记录：
+
+1. raft协议划分为两大部分，分别是领导者选举和日志复制。日志复制部分中，关于节点之间的日志数据不一致部分，不是很理解。
+
+1. Raft 是一种用来**管理复制日志**的算法。日志复制部分也是raft协议中最核心、比较难以理解的部分。安全性部分是对日志复制部分的补充、附加规则，是考虑极端场景下、考虑边界条件下对日志复制过程补充了限制条件。
+
+1. 在采用raft协议的分布式系统中，leader或者follower节点随时可能会崩溃，崩溃期间的节点会丢失许多复制日志的内容。因此raft协议需要有机制保证，当崩溃后的节点恢复后，崩溃节点的复制日志能够恢复到可用状态，日志顺序恢复到和leader节点一致。这个机制就是**一致性检查**。raft协议中日志复制部分，一致性检查是个需要理解的重点。
+
+1. 测试中遇到问题：
+
+   - `log.go`存在许多边界条件需要考虑的情况、下标越界问题：因为实验当中经常碰到要利用日志索引取出日志的情况、日志索引加1减1的情况，因此边界条件没有注意，就会发生日志索引越界问题，不过是小问题，很容易解决，看发生panic的时候，哪里的函数调用出错了，加强一下边界条件的判断即可。
+
+   - 随机的超时时间问题：测试随机超时时间的测试用例过程会很久，网上参考解决方法
+   
+     > 如果 et 太小，会过早开始选举，导致 term 比测试预期大。如果太大，会很晚发生选举，导致 term 比测试预期小。而且如果按照etcd那样一直递增，最后时间会非常长，直接卡住。我最后把它限制在 10~20 之间，通过测试。
+   
+   - 测试中，集群中单节点无法选举成为leader问题：follower发生选举时，如果是正常情况下，先becomeCandidate，然后向其他节点sendRequstVote消息，其他节点受到该消息后会决定是否投票，向leader节点发送RequestVoteResponse消息，leader节点在处理这个响应消息中，会判断是否有大多数节点投票。但是，在集群中只有一个单节点的情况下， 测试集不会触发 MsgRequestVoteResponse消息的发送，没有该消息的发送，就不会有处理该消息的过程，就不会有判断是否有大多数节点投过票的过程，就不会有candidate变成leader的结果，最后集群中单节点发起选举后无法变成leader，导致测试无法通过。解决方案就是单节点的情况下，如果发起投票选举，就直接成为leader节点，无需投票，当作特殊情况处理。
+   
+   - 节点的leader问题。测试集合中，一个节点接受到只可能是leader发来的消息，如果节点原来的leader和发送该消息的leader节点不一致，需要转换leader 节点。
+
+### PartB
+
+实验完成当前进度：
+
+- 看别人实现功能的思路的资料
+- 准备去看这部分的实验代码，熟悉一下代码的整体框架和内容。
+
+### PartC
+
+
+
