@@ -375,7 +375,7 @@ func (r *Raft) tick() {
 				r.heartbeatResp[r.id] = true
 				// 心跳回应数不超过一半，说明出现了网络分区且leader少数那边，leader 节点需要重新选举
 				if heartbeadtRespNum*2 <= peersNum {
-					r.Step(pb.Message{MsgType: pb.MessageType_MsgHup})
+					r.handleStartElection()
 				}
 			}
 
@@ -491,7 +491,7 @@ func (r *Raft) FollowerStep(m pb.Message) error{
 	var err error = nil
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
-		r.handleStartElection(m)
+		r.handleStartElection()
 	case pb.MessageType_MsgBeat:
 	case pb.MessageType_MsgPropose:
 		err = ErrProposalDropped
@@ -518,7 +518,7 @@ func (r *Raft) CandidateStep(m pb.Message) error{
 	var err error = nil
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
-		r.handleStartElection(m)
+		r.handleStartElection()
 	case pb.MessageType_MsgBeat:
 	case pb.MessageType_MsgPropose:
 		err = ErrProposalDropped
@@ -577,7 +577,7 @@ func (r *Raft) LeaderStep(m pb.Message) error{
 //////////////////////////////////////////////////////////////////以下是节点接受到消息后的具体处理方法（即处理RPC请求）
 
 // handleStartElection handle StartElection local request
-func (r *Raft) handleStartElection(m pb.Message) {
+func (r *Raft) handleStartElection() {
 	// Your Code Here (2A)
 	//follower节点受到请求选举消息，首先变成candidate节点，然后向其他节点发起投票请求
 	//测试集中，如果集群中只有一个单节点，不会触发 MsgRequestVoteResponse，需要特殊考虑
@@ -599,20 +599,22 @@ func (r *Raft) handleStartElection(m pb.Message) {
 func (r *Raft) handleTimeoutNow(m pb.Message) {
 	// Your Code Here (2A)
 	r.electionElapsed = 0
-	r.handleStartElection(m)
+	r.handleStartElection()
 }
 
 // handlePropose handle propose local request
 func (r *Raft) handlePropose(m pb.Message) {
 	// Your Code Here (2A)
 	//本地追加日志
+	lastIndex := r.RaftLog.LastIndex()
 	for i := range m.Entries {
-		m.Entries[i].Index = r.RaftLog.LastIndex() + uint64(i) + 1
 		m.Entries[i].Term = r.Term
-		r.RaftLog.entries = append(r.RaftLog.entries, *m.Entries[i])
+		m.Entries[i].Index = lastIndex + 1 + uint64(i)
+		r.RaftLog.entries = append(r.RaftLog.entries,*m.Entries[i])
 	}
 	r.Prs[r.id].Match = r.RaftLog.LastIndex()
-	r.Prs[r.id].Next = r.RaftLog.LastIndex() + 1
+	r.Prs[r.id].Next = r.Prs[r.id].Match + 1
+
 	//给其他节点同步日志
 	for followerId := range r.Prs {
 		if followerId != r.id {
@@ -692,6 +694,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		r.RaftLog.committed = min(m.Commit, r.RaftLog.lastAppend)
 	}
 }
+
 
 // handleAppendResponse handle AppendEntriesResponse RPC request
 func (r *Raft) handleAppendResponse(m pb.Message) {
@@ -874,6 +877,10 @@ func (r *Raft) hardState() pb.HardState {
 		Vote:   r.Vote,
 		Commit: r.RaftLog.committed,
 	}
+}
+
+func (r *Raft) GetId() uint64 {
+	return r.id
 }
 
 //////////////////////////////////////////////////////////////////

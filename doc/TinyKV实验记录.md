@@ -46,6 +46,9 @@
 1. 学习Raft一致性共识算法。主要看别人整理好的博客文章https://www.codedump.info/post/20180921-raft/和动画演示理解http://www.kailing.pub/raft/index.html，辅助参考raft官方论文译文https://github.com/maemual/raft-zh_cn/blob/master/raft-zh_cn.md。b站视频学习raft算法https://www.bilibili.com/video/BV1pr4y1b7H5/?spm_id_from=333.337.search-card.all.click。raft学习交互式动画https://raft.github.io/raftscope/index.html
 1. 看功能实现的官方文档和raft文件夹下的实验框架代码。功能实现的官方文档读的不是很明白。
 1. 完善`raft/log.go`代码,完善`raft/raft.go`代码.正在编写become等系列函数,这些函数在测试函数中使用,需要去测试代码中看看这些函数怎么用的,怎么测试project2a的功能的.
+1. 补完raft.go log.go里的代码，测试2aa 2ab
+1. 补完rawnode.go里的代码，测试2ac
+1. 完成project2a代码
 
 实验随手记录：
 
@@ -73,6 +76,31 @@
 
 - 看别人实现功能的思路的资料
 - 准备去看这部分的实验代码，熟悉一下代码的整体框架和内容。
+- 写完了peer_msg_handler.go和peer_storage.go文件需要补充的代码。
+- 测试集目前没有通过，有的request timeout 。正在排查原因
+
+实验随手记录：
+
+- project2a部分是实现一个raft算法，2b部分是使用2a部分实现的raft算法
+
+- 服务端接受客户端读写命令到回复客户端的流程大致是：
+
+  > - Clients calls RPC RawGet/RawPut/RawDelete/RawScan
+  > - RPC handler calls `RaftStorage` related method
+  > - `RaftStorage` sends a Raft command request to raftstore, and waits for the response
+  > - `RaftStore` proposes the Raft command request as a Raft log
+  > - Raft module appends the log, and persist by `PeerStorage`
+  > - Raft module commits the log
+  > - Raft worker executes the Raft command when handing Raft ready, and returns the response by callback
+  > - `RaftStorage` receive the response from callback and returns to RPC handler
+  > - RPC handler does some actions and returns the RPC response to clients.
+  
+- 测试当中的问题：
+
+  - 我raft/log.go中实现的nextEnts()方法有下标访问出错的问题。重新加强边界条件判断。
+  - 测试当中，raftcmd_type会有snap类型的日志条目执行。现在还不是特别理解为什么会有。之前以为2b部分不涉及快照文件，关于快照相关的功能实现都可以先不用考虑，所以碰到snap类型，我就空执行，结果测试的时候，每一个测试集都request timeout，不知道为什么。参考了别人实现的execsnap，也就返回了一个响应，实现之后测试集合就可以通过了。
+  - TestOnePartition2B测试集偶尔有失败情况，不知道为什么。知道原因了。这个测试集中，会出现一个网络分区的情况，如果原先的leader节点现在处于少部分节点的分区，那需要重新进行选举，选举出新的leader，该新leader肯定处于大部分节点的分区，这样才不影响读写。而我原先实现raft算法的代码里面，没有考虑这样的情况。
+
 
 ### PartC
 

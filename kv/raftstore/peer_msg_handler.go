@@ -2,14 +2,18 @@ package raftstore
 
 import (
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/Connor1996/badger/y"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/message"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/runner"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/snap"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
+	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/log"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 	rspb "github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
@@ -43,6 +47,229 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		return
 	}
 	// Your Code Here (2B).
+	// 1.如果有ready，就就去处理ready
+	rawNode := d.RaftGroup
+	if !rawNode.HasReady() {
+		return
+	}
+	ready := rawNode.Ready()
+	//2.处理ready:持久化日志条目
+
+	applySnapResult, err:= d.peerStorage.SaveReadyState(&ready)
+	if err != nil {
+		return 
+	}
+
+	if applySnapResult != nil {
+		if !reflect.DeepEqual(applySnapResult.PrevRegion, applySnapResult.Region) {
+			d.peerStorage.SetRegion(applySnapResult.Region)
+			d.ctx.storeMeta.Lock()
+			d.ctx.storeMeta.regions[applySnapResult.Region.Id] = applySnapResult.Region
+			d.ctx.storeMeta.regionRanges.Delete(&regionItem{region: applySnapResult.PrevRegion})
+			d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: applySnapResult.Region})
+			d.ctx.storeMeta.Unlock()
+		}
+	}
+	
+	//3.处理ready:发送给其他节点消息
+	if len(ready.Messages) > 0 {
+		d.Send(d.ctx.trans, ready.Messages)
+	}
+
+	//4.处理ready:已经应用的日志输入状态机，即执行日志中对应的命令
+	for _, entry := range ready.CommittedEntries {
+		d.peerStorage.applyState.AppliedIndex = entry.Index
+
+		kvWB := new(engine_util.WriteBatch)
+
+		if entry.EntryType == eraftpb.EntryType_EntryConfChange {
+			// todo:配置更改的日志执行
+		} else {
+			//一般日志的执行
+			d.execEntry(&entry, kvWB)
+		}
+
+		// 配置日志相关
+		if d.stopped {
+			return
+		}
+
+		// 写入状态
+		kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+		kvWB.WriteToDB(d.peerStorage.Engines.Kv)
+
+		engines := d.peerStorage.Engines
+		txn := engines.Kv.NewTransaction(false)
+		regionId := d.peerStorage.Region().GetId()
+		regionState := new(rspb.RegionLocalState)
+		err = engine_util.GetMetaFromTxn(txn, meta.RegionStateKey(regionId), regionState)
+
+		if err != nil {
+			log.Panic(err)
+		}
+
+	}
+
+	//5.处理ready:ready处理完毕，推进状态机
+	d.RaftGroup.Advance(ready)
+
+}
+
+//execEntry：执行日志里保存的命令
+func (d *peerMsgHandler) execEntry(entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
+	raftCmdreq := &raft_cmdpb.RaftCmdRequest{}
+	raftCmdreq.Unmarshal(entry.Data)
+
+	// 判断 RegionEpoch
+	if raftCmdreq.Header != nil {
+		fromEpoch := raftCmdreq.GetHeader().GetRegionEpoch()
+		if fromEpoch != nil {
+			if util.IsEpochStale(fromEpoch, d.Region().RegionEpoch) {
+				resp := ErrResp(&util.ErrEpochNotMatch{})
+				d.processProposals(resp,entry,false)
+				return
+			}
+		}
+	}
+
+	//todo:administrator requests处理
+
+	// normal requests
+	if len(raftCmdreq.Requests) > 0 {
+		req := raftCmdreq.Requests[0]
+		// fmt.Printf("%x execEntry at term %d, cmdType is %s\n", d.RaftGroup.Raft.GetId(), d.RaftGroup.Raft.Term, req.CmdType)
+		switch req.CmdType {
+			case raft_cmdpb.CmdType_Get:
+				d.execGet(entry, req)
+			case raft_cmdpb.CmdType_Put:
+				d.execPut(entry, req, kvWB)
+			case raft_cmdpb.CmdType_Delete:
+				d.execDelete(entry, req, kvWB)
+			case raft_cmdpb.CmdType_Snap:
+				d.execSnap(entry)
+		}
+	}
+	
+}
+
+func (d *peerMsgHandler) execGet(entry *eraftpb.Entry, req *raft_cmdpb.Request) {
+
+	// 应用日志输入到状态机，即执行日志里保存的对应命令
+	value, _ := engine_util.GetCF(d.peerStorage.Engines.Kv, req.Get.Cf, req.Get.Key)
+
+	// 命令执行完成后，需要调用回调函数，表明命令已经执行完成，因为命令的执行是异步的，所以需要回调函数来通知上层。
+	resps := []*raft_cmdpb.Response{{
+		CmdType: raft_cmdpb.CmdType_Get,
+		Get: &raft_cmdpb.GetResponse{
+			Value: value,
+		},
+	}}
+	cmdResp := &raft_cmdpb.RaftCmdResponse{
+		Header:    &raft_cmdpb.RaftResponseHeader{},
+		Responses: resps,
+	}
+	d.processProposals(cmdResp, entry, false)
+}
+
+func (d *peerMsgHandler) execPut(entry *eraftpb.Entry, req *raft_cmdpb.Request, kvWB *engine_util.WriteBatch) {
+	// 应用日志输入到状态机，即执行日志里保存的对应命令
+	kvWB.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
+
+	// 命令执行完成后，需要调用回调函数，表明命令已经执行完成，因为命令的执行是异步的，所以需要回调函数来通知上层。
+	resps := []*raft_cmdpb.Response{{
+		CmdType: raft_cmdpb.CmdType_Put,
+		Put:     &raft_cmdpb.PutResponse{},
+	}}
+	cmdResp := &raft_cmdpb.RaftCmdResponse{
+		Header:    &raft_cmdpb.RaftResponseHeader{},
+		Responses: resps,
+	}
+	d.processProposals(cmdResp, entry, false)
+}
+
+func (d *peerMsgHandler) execDelete(entry *eraftpb.Entry, req *raft_cmdpb.Request, kvWB *engine_util.WriteBatch) {
+	// 应用日志输入到状态机，即执行日志里保存的对应命令
+	kvWB.DeleteCF(req.Delete.Cf, req.Delete.Key)
+
+	// 命令执行完成后，需要调用回调函数，表明命令已经执行完成，因为命令的执行是异步的，所以需要回调函数来通知上层。
+	resps := []*raft_cmdpb.Response{{
+		CmdType: raft_cmdpb.CmdType_Delete,
+		Delete:  &raft_cmdpb.DeleteResponse{},
+	}}
+	cmdResp := &raft_cmdpb.RaftCmdResponse{
+		Header:    &raft_cmdpb.RaftResponseHeader{},
+		Responses: resps,
+	}
+	d.processProposals(cmdResp,entry,false)
+
+}
+
+func (d *peerMsgHandler) execSnap(entry *eraftpb.Entry) {
+
+	// 命令执行完成后，需要调用回调函数，表明命令已经执行完成，因为命令的执行是异步的，所以需要回调函数来通知上层。
+	resps := []*raft_cmdpb.Response{{
+		CmdType: raft_cmdpb.CmdType_Snap,
+		Snap: &raft_cmdpb.SnapResponse{
+			Region: d.Region(),
+		},
+	}}
+	cmdResp := &raft_cmdpb.RaftCmdResponse{
+		Header:    &raft_cmdpb.RaftResponseHeader{},
+		Responses: resps,
+	}
+	d.processProposals(cmdResp,entry,true)
+}
+
+
+func (d *peerMsgHandler) processProposals(resp *raft_cmdpb.RaftCmdResponse ,entry *eraftpb.Entry, isExecSnap bool){
+	length := len(d.proposals)
+	if length > 0 {
+		d.dropStaleProposal(entry)
+		if len(d.proposals) == 0 {
+			return
+		}
+		p := d.proposals[0]
+		if p.index > entry.Index {
+			return
+		}
+		// term 不匹配
+		if p.term != entry.Term {
+			NotifyStaleReq(entry.Term, p.cb)
+			d.proposals = d.proposals[1:]
+			return
+		}
+		// p.index == entry.Index && p.term == entry.Term， 开始执行并回应
+		if isExecSnap {
+			p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false) 
+		}
+		p.cb.Done(resp)
+		d.proposals = d.proposals[1:]
+
+		return
+	}
+}
+
+// 丢弃过时的 proposal
+func (d *peerMsgHandler) dropStaleProposal(entry *eraftpb.Entry) {
+	length := len(d.proposals)
+	if length > 0 {
+		i := 0
+		// 前面未回应的都说明过时了, 直接回应过时错误
+		for i < length {
+			p := d.proposals[i]
+			if p.index < entry.Index {
+				p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
+				i++
+			} else {
+				break
+			}
+		}
+		if i == length {
+			d.proposals = make([]*proposal, 0)
+			return
+		}
+		d.proposals = d.proposals[i:]
+	}
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -107,6 +334,7 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 	return err
 }
 
+
 func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	err := d.preProposeRaftCommand(msg)
 	if err != nil {
@@ -114,7 +342,36 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 	// Your Code Here (2B).
+	//处理每一个raftcmd请求。即封装成一个proposal消息，然后通过raftNode的propose方法提交到raft中。
+	for len(msg.Requests) > 0 {
+		request := msg.Requests[0]
+		var key []byte
+		switch request.CmdType {
+		case raft_cmdpb.CmdType_Get:
+			key = request.Get.Key
+		case raft_cmdpb.CmdType_Put:
+			key = request.Put.Key
+		case raft_cmdpb.CmdType_Delete:
+			key = request.Delete.Key
+		}
+
+		//判断key是否在region内
+		err = util.CheckKeyInRegion(key, d.Region())
+		if err != nil && request.CmdType != raft_cmdpb.CmdType_Snap {
+			cb.Done(ErrResp(err))
+			msg.Requests = msg.Requests[1:]
+			continue
+		}
+
+		//封装成proposal消息
+		data, _ := msg.Marshal()
+		p := &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb}
+		d.proposals = append(d.proposals, p)
+		msg.Requests = msg.Requests[1:]
+		d.RaftGroup.Propose(data)
+	}
 }
+
 
 func (d *peerMsgHandler) onTick() {
 	if d.stopped {

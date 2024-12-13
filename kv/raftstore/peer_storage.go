@@ -308,7 +308,41 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	// Your Code Here (2B).
-	return nil
+	var err error = nil
+	if len(entries) == 0 {
+		return nil
+	}
+
+	appendFirstIndex := entries[0].Index
+	appendLastIndex := entries[len(entries)-1].Index
+	psFirstIndex, err := ps.FirstIndex()
+	if err != nil {
+		return err
+	}
+	psLastIndex, err := ps.LastIndex()
+	if err != nil {
+		return err
+	}
+
+	if appendLastIndex <  psFirstIndex{
+		return nil
+	}
+
+	if appendFirstIndex < psFirstIndex {
+		entries = entries[psFirstIndex - appendFirstIndex:]
+	}
+
+	//更新
+	for _, entry := range entries {
+		key := meta.RaftLogKey(ps.region.Id, entry.Index)
+		err = raftWB.SetMeta(key, &entry)
+	}
+	//删除冲突部分
+	for i := appendLastIndex + 1; i <= psLastIndex; i++ {
+		key := meta.RaftLogKey(ps.region.Id, i)
+		raftWB.DeleteMeta(key)
+	}
+	return err
 }
 
 // Apply the peer with given snapshot
@@ -331,7 +365,58 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
-	return nil, nil
+	var err error = nil
+	var applySnapResult *ApplySnapResult = nil
+
+	kvWB := new(engine_util.WriteBatch)
+	raftWB := new(engine_util.WriteBatch)
+	
+	//调用ApplySnapshot()方法，持久化ready中的快照数据
+	if !raft.IsEmptySnap(&ready.Snapshot) {
+		applySnapResult, err = ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	//调用Append()方法，持久化ready中的日志条目
+	err = ps.Append(ready.Entries, raftWB)
+	if err != nil {
+		return nil, err
+	}
+
+	//持久化元数据信息
+	//先从ready结构体中获取相关成员值，设置好元数据信息raftState，applyState，regionState
+	if len(ready.Entries) > 0 {
+		newLastLogIndex := ready.Entries[len(ready.Entries)-1].Index
+		newLastLogTerm := ready.Entries[len(ready.Entries)-1].Term
+		oldLastLogIndex := ps.raftState.LastIndex
+		if newLastLogIndex > oldLastLogIndex {
+			ps.raftState.LastIndex = newLastLogIndex
+			ps.raftState.LastTerm = newLastLogTerm
+		}
+	}
+
+	if !raft.IsEmptyHardState(ready.HardState) {
+		ps.raftState.HardState = &ready.HardState
+	}
+	//再进行持久化（持久化元数据信息的方法，代码已经提供：SetMeta()）
+	err = raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
+	if err != nil {
+		return nil, err
+	}
+
+	//writeBatch里批量更改键值对的方法，都是先在内存更改，最后需要统一写入数据库
+	err = raftWB.WriteToDB(ps.Engines.Raft)
+	if err != nil {
+		return nil, err
+	}
+	err = kvWB.WriteToDB(ps.Engines.Kv)
+	if err != nil {
+		return nil, err
+	}
+
+	return applySnapResult, err
 }
 
 func (ps *PeerStorage) ClearData() {
