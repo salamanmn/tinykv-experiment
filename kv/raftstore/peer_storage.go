@@ -357,7 +357,52 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
 	// and ps.clearExtraData to delete stale data
 	// Your Code Here (2C).
-	return nil, nil
+	//删除过时数据
+	if ps.isInitialized() {
+		if err := ps.clearMeta(kvWB, raftWB); err != nil {
+			return nil, err
+		}
+		ps.clearExtraData(snapData.Region)
+	}
+	snapShotIndex := snapshot.Metadata.Index
+	snapShotTerm := snapshot.Metadata.Term
+
+	ps.raftState.LastIndex = snapShotIndex
+	ps.raftState.LastTerm = snapShotIndex
+
+	ps.applyState.AppliedIndex = snapShotIndex
+	ps.applyState.TruncatedState.Index = snapShotIndex
+	ps.applyState.TruncatedState.Term = snapShotTerm
+
+	ps.snapState.StateType = snap.SnapState_Applying
+
+	// 更新raftState
+	raftWB.SetMeta(meta.RaftStateKey(snapData.GetRegion().GetId()), ps.raftState)
+	// 更新applyState
+	kvWB.SetMeta(meta.ApplyStateKey(snapData.GetRegion().GetId()), ps.applyState)
+	// 更新regionState
+	meta.WriteRegionState(kvWB, snapData.GetRegion(), rspb.PeerState_Normal)
+
+	//将 Snapshot 中的 K-V 存储到底层。只需要生成 RegionTaskApply，传递给 ps.regionSched 管道，异步完成 Snapshot 应用到 kvDB 中
+	resultCh := make(chan bool, 1)//用来接受snapshot 是否应用成功
+	ps.regionSched <- &runner.RegionTaskApply{
+		RegionId: snapData.Region.GetId(),
+		Notifier: resultCh,
+		SnapMeta: snapshot.Metadata,
+		StartKey: snapData.Region.GetStartKey(),
+		EndKey:   snapData.Region.GetEndKey(),
+	}
+
+	if !(<-resultCh) {
+		return nil, nil
+	}
+
+	applySnapRet := &ApplySnapResult{
+		PrevRegion: ps.Region(),
+		Region:     snapData.Region,
+	}
+
+	return applySnapRet, nil
 }
 
 // Save memory states to disk.

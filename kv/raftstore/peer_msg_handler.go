@@ -76,16 +76,16 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		d.Send(d.ctx.trans, ready.Messages)
 	}
 
-	//4.处理ready:已经应用的日志输入状态机，即执行日志中对应的命令
+	//4.处理ready:已经提交但未应用的日志可以应用了，可以输入状态机，即执行日志中对应的命令
 	for _, entry := range ready.CommittedEntries {
 		d.peerStorage.applyState.AppliedIndex = entry.Index
 
 		kvWB := new(engine_util.WriteBatch)
 
 		if entry.EntryType == eraftpb.EntryType_EntryConfChange {
-			// todo:配置更改的日志执行
+			// todo:配置更改的日志应用，即执行
 		} else {
-			//一般日志的执行
+			//一般日志的应用，即执行
 			d.execEntry(&entry, kvWB)
 		}
 
@@ -97,17 +97,6 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		// 写入状态
 		kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
 		kvWB.WriteToDB(d.peerStorage.Engines.Kv)
-
-		engines := d.peerStorage.Engines
-		txn := engines.Kv.NewTransaction(false)
-		regionId := d.peerStorage.Region().GetId()
-		regionState := new(rspb.RegionLocalState)
-		err = engine_util.GetMetaFromTxn(txn, meta.RegionStateKey(regionId), regionState)
-
-		if err != nil {
-			log.Panic(err)
-		}
-
 	}
 
 	//5.处理ready:ready处理完毕，推进状态机
@@ -115,7 +104,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 
 }
 
-//execEntry：执行日志里保存的命令
+//execEntry：应用日志，即执行日志里保存的命令
 func (d *peerMsgHandler) execEntry(entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
 	raftCmdreq := &raft_cmdpb.RaftCmdRequest{}
 	raftCmdreq.Unmarshal(entry.Data)
@@ -133,6 +122,12 @@ func (d *peerMsgHandler) execEntry(entry *eraftpb.Entry, kvWB *engine_util.Write
 	}
 
 	//todo:administrator requests处理
+	if raftCmdreq.AdminRequest != nil {
+		switch raftCmdreq.AdminRequest.CmdType {
+			case raft_cmdpb.AdminCmdType_CompactLog:
+				d.execCompactLog(entry, raftCmdreq.AdminRequest, kvWB)
+		}
+	}
 
 	// normal requests
 	if len(raftCmdreq.Requests) > 0 {
@@ -220,6 +215,27 @@ func (d *peerMsgHandler) execSnap(entry *eraftpb.Entry) {
 	d.processProposals(cmdResp,entry,true)
 }
 
+func (d *peerMsgHandler) execCompactLog(entry *eraftpb.Entry, req *raft_cmdpb.AdminRequest, kvWB *engine_util.WriteBatch) {
+	compactLog := req.GetCompactLog()
+	if compactLog.CompactIndex >= d.peerStorage.applyState.TruncatedState.Index {
+		d.peerStorage.applyState.TruncatedState.Index= compactLog.CompactIndex
+		d.peerStorage.applyState.TruncatedState.Term = compactLog.CompactTerm
+		kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+		d.ScheduleCompactLog(compactLog.CompactIndex)//异步完成日志压缩的任务
+	}
+
+	// 命令执行完成后，需要调用回调函数，表明命令已经执行完成，因为命令的执行是异步的，所以需要回调函数来通知上层。
+	adminResp := &raft_cmdpb.AdminResponse{
+		CmdType:    raft_cmdpb.AdminCmdType_CompactLog,
+		CompactLog: &raft_cmdpb.CompactLogResponse{},
+	}
+	cmdResp := &raft_cmdpb.RaftCmdResponse{
+		Header:        &raft_cmdpb.RaftResponseHeader{},
+		AdminResponse: adminResp,
+	}
+	d.processProposals(cmdResp, entry, false)
+
+}
 
 func (d *peerMsgHandler) processProposals(resp *raft_cmdpb.RaftCmdResponse ,entry *eraftpb.Entry, isExecSnap bool){
 	length := len(d.proposals)
@@ -342,6 +358,7 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 	// Your Code Here (2B).
+	//normal requests处理(注意RaftCmdRequest中的normal request有多个)
 	//处理每一个raftcmd请求。即封装成一个proposal消息，然后通过raftNode的propose方法提交到raft中。
 	for len(msg.Requests) > 0 {
 		request := msg.Requests[0]
@@ -364,11 +381,28 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		}
 
 		//封装成proposal消息
-		data, _ := msg.Marshal()
+		//这里为什么是序列化整个msg，一是因为代码里只有RaftCmdRequest对应的序列化反序列化方法。可以看到我们序列化的msg是，1-n、2-n、3-n这种规律
+		//二是因为除了序列化request外，还需要序列化header，因此我们序列化整个msg：raftcmdRequest
+		//三是可能是如果仅仅单独序列化request和adminrequest，反序列过程就无法判断成反序列化成哪一个
+		//最后反序列化成RaftCmdRequest，我们需要的只有requests中第一个request。
+		data, _ := msg.Marshal() 
 		p := &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb}
 		d.proposals = append(d.proposals, p)
 		msg.Requests = msg.Requests[1:]
 		d.RaftGroup.Propose(data)
+	}
+
+	//admin requests处理(注意RaftCmdRequest中的admin request只有一个)
+	//admin requests是服务端内部自己产生的，而非客户端发来的，所以应该回调函数为空是正确的
+	if msg.AdminRequest != nil {
+		request := msg.AdminRequest
+		switch request.CmdType {
+		case raft_cmdpb.AdminCmdType_CompactLog:
+			data, _ := msg.Marshal()
+			p := &proposal{index: d.nextProposalIndex(), term: d.Term(), cb: cb}
+			d.proposals = append(d.proposals, p)
+			d.RaftGroup.Propose(data)
+		}
 	}
 }
 

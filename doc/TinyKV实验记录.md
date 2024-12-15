@@ -104,5 +104,7 @@
 
 ### PartC
 
-
+- 测试当中的问题：
+  - TestRestoreSnapshot2C、TestProvideSnap2C测试不通过。排查过程：发现这些测试都是对raft.go文件的测试，因此先检查了raft.go文件中关于snapshot功能的代码部分。同时，去看了一下TestRestoreSnapshot2C、TestProvideSnap2C的测试代码，发现测试代码当中使用到了配置相关的代码ConfigState，而我关于snapshot功能的部分是没有处理这部分的，因为当时觉得集群更改、配置更改的功能应该到project3才涉及。解决方案：添加上对于snapshot.ConfigState的处理，如果snapshot.ConfigState不为空，就对集群进行设置。
+  - TestSnapshotUnreliableRecoverConcurrentPartition2C测试不通过。排查过程：错误堆栈里发现是有一处地方panic了。该panic的地方，发现是entries, err := storage.Entries(firstIndex, lastIndex+1)存在err后，自己手动panic了。对于这个方法而言，如果访问到了压缩之前的日志条目，方法会返回err。为了测试通过，当发现err时，不应手动panic。
 

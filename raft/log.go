@@ -74,7 +74,8 @@ func newLog(storage Storage) *RaftLog {
 	}
 	entries, err := storage.Entries(firstIndex, lastIndex+1)
 	if err != nil {
-		panic(err)
+		//do nothing
+		entries = nil
 	}
 	
 	hardState, _, _ := storage.InitialState()
@@ -95,6 +96,15 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+	//compactIndex之前的日志已经被压缩
+	compactIndex, _ := l.storage.FirstIndex()
+	if len(l.entries) > 0 {
+		if compactIndex > l.LastIndex() {
+			l.entries = nil
+		} else if compactIndex >= l.FirstIndex() {
+			l.entries = l.entries[compactIndex-l.FirstIndex():]
+		}
+	}
 }
 
 // allEntries return all the entries not compacted.

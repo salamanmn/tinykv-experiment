@@ -226,8 +226,10 @@ func (r *Raft) sendAppend(to uint64) bool {
 
 	prevLogIndex := nextIndex - 1
 	prevLogTerm, err := r.RaftLog.Term(prevLogIndex)
-	if err != nil {
-		return false
+	//如果nextIndex小于日志的第一个索引，说明to节点的快照落后，则需要发送snapshot
+	if err != nil || nextIndex < r.RaftLog.FirstIndex(){
+		r.sendSnapshot(to)
+		return true
 	}
 	leaderCommit := r.RaftLog.committed
 	
@@ -335,7 +337,31 @@ func (r *Raft) sendRequestVoteResponse(reject bool,  to uint64) {
 	r.msgs = append(r.msgs, msg)
 }
 
+// sendSnapshot sends a Snapshot RPC to the given peer.
 
+func (r *Raft) sendSnapshot(to uint64){
+	var snapshot pb.Snapshot
+	var err error
+	
+	//没有待处理的快照就生成一份
+	if !IsEmptySnap(r.RaftLog.pendingSnapshot) {
+		snapshot = *r.RaftLog.pendingSnapshot 
+	} else {
+		snapshot, err = r.RaftLog.storage.Snapshot()
+		if err != nil {
+			return
+		}
+	}
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgSnapshot,
+		From: r.id,
+		Term: r.Term,
+		Snapshot: &snapshot,
+		To: to,
+	}
+	r.msgs = append(r.msgs, msg)
+	r.Prs[to].Next = snapshot.Metadata.Index + 1
+}
 
 //////////////////////////////////////////////////////////////////以下是Tick时间驱动相关方法
 
@@ -864,6 +890,67 @@ func (r *Raft) handleBeat(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	//任期的前置判断
+	if r.Term < m.Term {
+		r.Term = m.Term
+		if r.State != StateFollower {
+			r.becomeFollower(r.Term,None)
+		}
+	}
+
+	if m.Term < r.Term {
+		return
+	}
+
+	if r.Lead != m.From {
+		r.Lead = m .From
+	}
+
+	snapShotIndex := m.Snapshot.Metadata.Index
+	snapShotTerm := m.Snapshot.Metadata.Term
+	snapShotConfState := m.Snapshot.Metadata.ConfState
+
+	if snapShotIndex < r.RaftLog.committed || snapShotIndex < r.RaftLog.FirstIndex(){
+		return
+	}
+
+	// 将快照文件包含的日志全部删除
+	if len(r.RaftLog.entries) > 0 {
+		if snapShotIndex >= r.RaftLog.LastIndex() {
+			r.RaftLog.entries = nil
+		} else {
+			r.RaftLog.entries = r.RaftLog.entries[snapShotIndex - r.RaftLog.FirstIndex() + 1 :]
+		}
+	}
+
+	r.RaftLog.committed = snapShotIndex
+	r.RaftLog.applied = snapShotIndex
+	r.RaftLog.stabled = snapShotIndex
+
+	// 集群节点设置（变更）
+	if snapShotConfState != nil {
+		r.Prs = make(map[uint64]*Progress)
+		for _, node := range snapShotConfState.Nodes {
+			r.Prs[node] = &Progress{}
+			r.Prs[node].Next = r.RaftLog.LastIndex() + 1
+			r.Prs[node].Match = 0
+		}
+	}
+
+	// 加一个空条目，使得通过LastIndex()获取的lastIndex、lastTerm正确
+	//该空条目仅仅用来表示快照文件的最后一个日志条目的索引和任期
+	if r.RaftLog.LastIndex() < snapShotIndex {
+		entry := pb.Entry{
+			EntryType: pb.EntryType_EntryNormal,
+			Index: snapShotIndex,
+			Term: snapShotTerm,
+		}
+		r.RaftLog.entries = append(r.RaftLog.entries, entry)
+	}
+
+	r.RaftLog.pendingSnapshot = m.Snapshot
+	r.sendAppendResponse(false,m.From)
+
 }
 
 //////////////////////////////////////////////////////////////////节点的软状态、硬状态相关
