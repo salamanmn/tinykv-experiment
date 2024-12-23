@@ -43,7 +43,7 @@
 
 实验完成当前进度和步骤：
 
-1. 学习Raft一致性共识算法。主要看别人整理好的博客文章https://www.codedump.info/post/20180921-raft/和动画演示理解http://www.kailing.pub/raft/index.html，辅助参考raft官方论文译文https://github.com/maemual/raft-zh_cn/blob/master/raft-zh_cn.md。b站视频学习raft算法https://www.bilibili.com/video/BV1pr4y1b7H5/?spm_id_from=333.337.search-card.all.click。raft学习交互式动画https://raft.github.io/raftscope/index.html
+1. 学习Raft一致性共识算法。主要看别人整理好的博客文章https://www.codedump.info/post/20180921-raft/和动画演示理解http://www.kailing.pub/raft/index.html，辅助参考raft官方论文译文https://github.com/maemual/raft-zh_cn/blob/master/raft-zh_cn.md。b站视频学习raft算法https://www.bilibili.com/video/BV1pr4y1b7H5/?spm_id_from=333.337.search-card.all.click。raft学习交互式动画https://raft.github.io/raftscope/index.html。
 1. 看功能实现的官方文档和raft文件夹下的实验框架代码。功能实现的官方文档读的不是很明白。
 1. 完善`raft/log.go`代码,完善`raft/raft.go`代码.正在编写become等系列函数,这些函数在测试函数中使用,需要去测试代码中看看这些函数怎么用的,怎么测试project2a的功能的.
 1. 补完raft.go log.go里的代码，测试2aa 2ab
@@ -110,7 +110,7 @@
 
 ## project4
 
-### PartA
+### PartA、B、C
 
 相关资料学习：
 
@@ -120,6 +120,7 @@
 实验随手记录：
 
 - 什么是mvcc、percolator、2pc？
-
 - tinykv的transaction是建立在mvcc机制之上的。
 - project4是实现分布式事务协议percolator的。project4a实现的mvcc以及project4b、4c都是分布式事务协议percolator的具体代码实现。
+- 4b中测试会重复提交，此时lock为空，需要特殊处理
+- 事务提交这里有点懵， 不是特别理解怎么进行事务回滚的。答：回滚：删除 meta 中的 Lock 标记 , 删除版本为 startTs 的数据。
