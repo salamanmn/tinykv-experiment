@@ -74,7 +74,7 @@
 
 实验完成当前进度：
 
-- 看别人实现功能的思路的资料
+- 看了别人实现功能的思路的资料
 - 准备去看这部分的实验代码，熟悉一下代码的整体框架和内容。
 - 写完了peer_msg_handler.go和peer_storage.go文件需要补充的代码。
 - 测试集目前没有通过，有的request timeout 。正在排查原因
@@ -98,7 +98,7 @@
 - 测试当中的问题：
 
   - 我raft/log.go中实现的nextEnts()方法有下标访问出错的问题。重新加强边界条件判断。
-  - 测试当中，raftcmd_type会有snap类型的日志条目执行。现在还不是特别理解为什么会有。之前以为2b部分不涉及快照文件，关于快照相关的功能实现都可以先不用考虑，所以碰到snap类型，我就空执行，结果测试的时候，每一个测试集都request timeout，不知道为什么。参考了别人实现的execsnap，也就返回了一个响应，实现之后测试集合就可以通过了。
+  - 测试当中，raftcmd_type会有snap类型的日志条目执行。之前以为2b部分不涉及快照文件，关于快照相关的功能实现都可以先不用考虑，所以碰到snap类型，我就空执行，结果测试的时候，每一个测试集都request timeout，不知道为什么。参考了别人实现的execsnap，也就返回了一个响应，实现之后测试集合就可以通过了。
   - TestOnePartition2B测试集偶尔有失败情况，不知道为什么。知道原因了。这个测试集中，会出现一个网络分区的情况，如果原先的leader节点现在处于少部分节点的分区，那需要重新进行选举，选举出新的leader，该新leader肯定处于大部分节点的分区，这样才不影响读写。而我原先实现raft算法的代码里面，没有考虑这样的情况。
 
 
@@ -106,7 +106,7 @@
 
 - 测试当中的问题：
   - TestRestoreSnapshot2C、TestProvideSnap2C测试不通过。排查过程：发现这些测试都是对raft.go文件的测试，因此先检查了raft.go文件中关于snapshot功能的代码部分。同时，去看了一下TestRestoreSnapshot2C、TestProvideSnap2C的测试代码，发现测试代码当中使用到了配置相关的代码ConfigState，而我关于snapshot功能的部分是没有处理这部分的，因为当时觉得集群更改、配置更改的功能应该到project3才涉及。解决方案：添加上对于snapshot.ConfigState的处理，如果snapshot.ConfigState不为空，就对集群进行设置。
-  - TestSnapshotUnreliableRecoverConcurrentPartition2C测试不通过。排查过程：错误堆栈里发现是有一处地方panic了。该panic的地方，发现是entries, err := storage.Entries(firstIndex, lastIndex+1)存在err后，自己手动panic了。对于这个方法而言，如果访问到了压缩之前的日志条目，方法会返回err。为了测试通过，当发现err时，不应手动panic。
+  - TestSnapshotUnreliableRecoverConcurrentPartition2C测试不通过。排查过程：错误堆栈里发现是有一处地方panic了。该panic的地方，发现是entries, err := storage.Entries(firstIndex, lastIndex+1)存在err后，自己手动panic了。对于这个方法而言，如果访问到了压缩之前的日志条目，方法会返回err。为了测试通过，当发现err时，不应直接panic。
 
 ## project4
 
